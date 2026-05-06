@@ -733,9 +733,14 @@ _cover_cache: dict[int, dict[tuple[str, str], bytes]] = {}
 
 def _build_content_disposition(filename: str) -> str:
     """Build a Content-Disposition header compatible with non-ASCII filenames."""
-    stem_source, dot, extension = filename.rpartition(".")
-    suffix = f".{extension}" if dot and re.fullmatch(r"[A-Za-z0-9]+", extension) else ""
-    stem_source = stem_source if suffix else filename
+    lower_filename = filename.lower()
+    if lower_filename.endswith(".gcode.3mf"):
+        suffix = ".gcode.3mf"
+        stem_source = filename[: -len(suffix)]
+    else:
+        stem_source, dot, extension = filename.rpartition(".")
+        suffix = f".{extension}" if dot and re.fullmatch(r"[A-Za-z0-9]+", extension) else ""
+        stem_source = stem_source if suffix else filename
 
     primary_stem = stem_source.split(".", 1)[0]
     ascii_stem = primary_stem.encode("ascii", "ignore").decode("ascii")

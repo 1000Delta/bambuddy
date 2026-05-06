@@ -240,10 +240,11 @@ class TestPrintersAPI:
     @pytest.mark.parametrize(
         ("filename", "ascii_fallback"),
         [
-            ("こんにちは.gcode.3mf", "download.3mf"),
-            ("résumé.gcode.3mf", "rsum.3mf"),
-            ("مرحبا.gcode.3mf", "download.3mf"),
-            ("文件.gcode.3mf", "download.3mf"),
+            ("こんにちは.gcode.3mf", "download.gcode.3mf"),
+            ("résumé.gcode.3mf", "rsum.gcode.3mf"),
+            ("مرحبا.gcode.3mf", "download.gcode.3mf"),
+            ("文件.gcode.3mf", "download.gcode.3mf"),
+            ("模型.3mf", "download.3mf"),
         ],
     )
     async def test_download_printer_file_sets_rfc5987_content_disposition_for_unicode_filename(
