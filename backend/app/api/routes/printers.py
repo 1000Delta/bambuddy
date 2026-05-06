@@ -733,19 +733,15 @@ _cover_cache: dict[int, dict[tuple[str, str], bytes]] = {}
 
 def _build_content_disposition(filename: str) -> str:
     """Build a Content-Disposition header compatible with non-ASCII filenames."""
-    ascii_fallback = filename.encode("ascii", "ignore").decode("ascii")
-    ascii_fallback = ascii_fallback.replace('"', "")
+    stem_source, dot, extension = filename.rpartition(".")
+    suffix = f".{extension}" if dot and re.fullmatch(r"[A-Za-z0-9]+", extension) else ""
+    stem_source = stem_source if suffix else filename
 
-    suffix_match = re.search(r"(\.[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*)$", ascii_fallback)
-    suffixes = suffix_match.group(1) if suffix_match else ""
-    stem = ascii_fallback[: -len(suffixes)] if suffixes else ascii_fallback
-    stem = stem.strip(" ._-")
+    primary_stem = stem_source.split(".", 1)[0]
+    ascii_stem = primary_stem.encode("ascii", "ignore").decode("ascii")
+    ascii_stem = ascii_stem.replace('"', "").strip(" ._-")
 
-    if not stem:
-        ascii_fallback = f"download{suffixes}" if suffixes else "download"
-    else:
-        ascii_fallback = f"{stem}{suffixes}"
-
+    ascii_fallback = f"{ascii_stem or 'download'}{suffix}"
     return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(filename)}"
 
 
