@@ -237,12 +237,20 @@ class TestPrintersAPI:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
+    @pytest.mark.parametrize(
+        ("filename", "ascii_fallback"),
+        [
+            ("こんにちは.gcode.3mf", ".gcode.3mf"),
+            ("résumé.gcode.3mf", "rsum.gcode.3mf"),
+            ("مرحبا.gcode.3mf", ".gcode.3mf"),
+            ("文件.gcode.3mf", ".gcode.3mf"),
+        ],
+    )
     async def test_download_printer_file_sets_rfc5987_content_disposition_for_unicode_filename(
-        self, async_client: AsyncClient, printer_factory, db_session
+        self, async_client: AsyncClient, printer_factory, filename: str, ascii_fallback: str, db_session
     ):
-        """Verify unicode filenames are exposed via RFC 5987 content-disposition."""
+        """Verify non-ASCII filenames are exposed via RFC 5987 content-disposition."""
         printer = await printer_factory()
-        filename = "龙泡泡石墩子_p2s_ok.gcode.3mf"
         file_bytes = b"fake 3mf content"
 
         with patch(
@@ -257,7 +265,7 @@ class TestPrintersAPI:
         assert response.status_code == 200
         assert response.content == file_bytes
         content_disposition = response.headers["content-disposition"]
-        assert 'filename="_p2s_ok.gcode.3mf"' in content_disposition
+        assert f'filename="{ascii_fallback}"' in content_disposition
         assert "filename*=UTF-8''" in content_disposition
         encoded_name = content_disposition.split("filename*=UTF-8''", 1)[1]
         assert unquote(encoded_name) == filename
