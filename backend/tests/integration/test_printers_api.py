@@ -3,7 +3,8 @@
 Tests the full request/response cycle for /api/v1/printers/ endpoints.
 """
 
-from unittest.mock import MagicMock, patch
+from urllib.parse import unquote
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import AsyncClient
@@ -229,6 +230,37 @@ class TestPrintersAPI:
         response = await async_client.delete("/api/v1/printers/9999")
 
         assert response.status_code == 404
+
+    # ========================================================================
+    # File manager endpoints
+    # ========================================================================
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_download_printer_file_sets_rfc5987_content_disposition_for_unicode_filename(
+        self, async_client: AsyncClient, printer_factory, db_session
+    ):
+        """Verify unicode filenames are exposed via RFC 5987 content-disposition."""
+        printer = await printer_factory()
+        filename = "龙泡泡石墩子_p2s_ok.gcode.3mf"
+        file_bytes = b"fake 3mf content"
+
+        with patch(
+            "backend.app.api.routes.printers.download_file_bytes_async",
+            new=AsyncMock(return_value=file_bytes),
+        ):
+            response = await async_client.get(
+                f"/api/v1/printers/{printer.id}/files/download",
+                params={"path": f"/cache/{filename}"},
+            )
+
+        assert response.status_code == 200
+        assert response.content == file_bytes
+        content_disposition = response.headers["content-disposition"]
+        assert 'filename="_p2s_ok.gcode.3mf"' in content_disposition
+        assert "filename*=UTF-8''" in content_disposition
+        encoded_name = content_disposition.split("filename*=UTF-8''", 1)[1]
+        assert unquote(encoded_name) == filename
 
     # ========================================================================
     # Status endpoint

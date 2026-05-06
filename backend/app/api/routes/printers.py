@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 import zipfile
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
@@ -730,6 +731,15 @@ async def test_printer_connection(
 _cover_cache: dict[int, dict[tuple[str, str], bytes]] = {}
 
 
+def _build_content_disposition(filename: str) -> str:
+    """Build a Content-Disposition header compatible with non-ASCII filenames."""
+    ascii_fallback = filename.encode("ascii", "ignore").decode("ascii")
+    ascii_fallback = ascii_fallback.replace('"', "")
+    if not ascii_fallback:
+        ascii_fallback = "download"
+    return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(filename)}"
+
+
 def clear_cover_cache(printer_id: int) -> None:
     """Clear cached cover images for a printer. Call on print start to avoid stale thumbnails."""
     _cover_cache.pop(printer_id, None)
@@ -1018,7 +1028,7 @@ async def download_printer_file(
     return Response(
         content=data,
         media_type=content_type,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": _build_content_disposition(filename)},
     )
 
 
