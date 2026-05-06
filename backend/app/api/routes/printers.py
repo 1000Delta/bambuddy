@@ -735,8 +735,17 @@ def _build_content_disposition(filename: str) -> str:
     """Build a Content-Disposition header compatible with non-ASCII filenames."""
     ascii_fallback = filename.encode("ascii", "ignore").decode("ascii")
     ascii_fallback = ascii_fallback.replace('"', "")
-    if not ascii_fallback:
-        ascii_fallback = "download"
+
+    suffix_match = re.search(r"(\.[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*)$", ascii_fallback)
+    suffixes = suffix_match.group(1) if suffix_match else ""
+    stem = ascii_fallback[: -len(suffixes)] if suffixes else ascii_fallback
+    stem = stem.strip(" ._-")
+
+    if not stem:
+        ascii_fallback = f"download{suffixes}" if suffixes else "download"
+    else:
+        ascii_fallback = f"{stem}{suffixes}"
+
     return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(filename)}"
 
 
