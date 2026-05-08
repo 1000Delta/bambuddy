@@ -3,8 +3,8 @@
 Tests the full request/response cycle for /api/v1/printers/ endpoints.
 """
 
-from urllib.parse import unquote
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import unquote
 
 import pytest
 from httpx import AsyncClient
