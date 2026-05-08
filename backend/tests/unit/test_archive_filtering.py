@@ -363,8 +363,8 @@ class TestScanForTimelapseWithRetries:
         mock_service.attach_timelapse.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_name_match_fallback(self):
-        """When no new file appears, should fall back to name matching."""
+    async def test_name_match_fallback_ignores_files_already_in_baseline(self):
+        """Should not attach a baseline file via name-match fallback after retries are exhausted."""
         mock_archive, mock_printer = self._make_mocks()
 
         baseline_files = [
@@ -400,10 +400,7 @@ class TestScanForTimelapseWithRetries:
 
             await _scan_for_timelapse_with_retries(1)
 
-        # Name-match fallback: "benchy" is in "benchy_20240101.mp4"
-        mock_service.attach_timelapse.assert_called_once()
-        attached_filename = mock_service.attach_timelapse.call_args[0][2]
-        assert attached_filename == "benchy_20240101.mp4"
+        mock_service.attach_timelapse.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_stops_when_archive_already_has_timelapse(self):
@@ -756,6 +753,74 @@ class TestAttachTimelapseBackgroundConversion:
         assert "timelapse-convert-1" in mock_create_task.call_args[1]["name"]
         # Close the unawaited coroutine to prevent GC warning
         mock_create_task.call_args[0][0].close()
+
+
+class TestManualScanTimelapse:
+    """Test POST /archives/{id}/timelapse/scan endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_scan_requires_manual_selection_for_heuristic_match_when_multiple_files_exist(self):
+        """Should return manual selection instead of auto-attaching a timestamp-only match from a crowded folder."""
+        from datetime import datetime
+
+        from backend.app.api.routes.archives import scan_timelapse
+
+        mock_archive = MagicMock()
+        mock_archive.id = 1
+        mock_archive.timelapse_path = None
+        mock_archive.printer_id = 1
+        mock_archive.filename = "widget.gcode.3mf"
+        mock_archive.started_at = datetime(2026, 5, 8, 9, 43, 48)
+        mock_archive.completed_at = datetime(2026, 5, 8, 10, 30, 0)
+        mock_archive.created_at = datetime(2026, 5, 8, 10, 30, 0)
+
+        mock_printer = MagicMock()
+        mock_printer.id = 1
+        mock_printer.ip_address = "192.168.1.100"
+        mock_printer.access_code = "12345678"
+        mock_printer.model = "X1C"
+
+        video_files = [
+            {
+                "name": "video_2026-05-08_09-41-29.mp4",
+                "is_directory": False,
+                "size": 1000,
+                "path": "/timelapse/video_2026-05-08_09-41-29.mp4",
+                "mtime": datetime(2026, 5, 8, 9, 50, 0),
+            },
+            {
+                "name": "video_2026-05-08_09-46-00.mp4",
+                "is_directory": False,
+                "size": 1000,
+                "path": "/timelapse/video_2026-05-08_09-46-00.mp4",
+                "mtime": datetime(2026, 5, 8, 9, 55, 0),
+            },
+        ]
+
+        mock_service = MagicMock()
+        mock_service.get_archive = AsyncMock(return_value=mock_archive)
+        mock_service.attach_timelapse = AsyncMock(return_value=True)
+
+        mock_db = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_printer
+        mock_db.execute = AsyncMock(return_value=mock_result)
+
+        with (
+            patch("backend.app.api.routes.archives.ArchiveService", return_value=mock_service),
+            patch(f"{_FTP_MODULE}.list_files_async", new_callable=AsyncMock) as mock_list,
+            patch(f"{_FTP_MODULE}.download_file_bytes_async", new_callable=AsyncMock) as mock_download,
+            patch(f"{_FTP_MODULE}.get_ftp_retry_settings", new_callable=AsyncMock) as mock_retry,
+        ):
+            mock_list.return_value = video_files
+            mock_download.return_value = b"fake video data"
+            mock_retry.return_value = (False, 0, 0, 30)
+
+            result = await scan_timelapse(archive_id=1, db=mock_db)
+
+        assert result["status"] == "not_found"
+        assert len(result["available_files"]) == 2
+        mock_service.attach_timelapse.assert_not_called()
 
 
 class TestDeleteTimelapse:

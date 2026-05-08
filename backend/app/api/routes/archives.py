@@ -1710,6 +1710,7 @@ async def scan_timelapse(
 
     # Look for matching timelapse
     matching_file = None
+    match_strategy = None
     video_files = [
         f for f in files if not f.get("is_directory") and f.get("name", "").lower().endswith((".mp4", ".avi"))
     ]
@@ -1719,6 +1720,7 @@ async def scan_timelapse(
         fname = f.get("name", "")
         if base_name.lower() in fname.lower():
             matching_file = f
+            match_strategy = "name"
             break
 
     # Strategy 2: Match by timestamp proximity
@@ -1779,6 +1781,7 @@ async def scan_timelapse(
         # Accept match within 4 hours (more lenient for timezone issues)
         if best_match and best_diff < timedelta(hours=4):
             matching_file = best_match
+            match_strategy = "timestamp"
             logger.info("Matched timelapse by timestamp: %s (diff: %s)", best_match.get("name"), best_diff)
 
     # Strategy 3: Use file modification time from FTP listing
@@ -1807,6 +1810,7 @@ async def scan_timelapse(
 
         if best_match and best_diff < timedelta(hours=2):
             matching_file = best_match
+            match_strategy = "mtime"
             logger.info("Matched timelapse by file mtime: %s (diff: %s)", best_match.get("name"), best_diff)
 
     # Strategy 4: If only one timelapse exists and archive was recently completed, use it
@@ -1822,11 +1826,22 @@ async def scan_timelapse(
             # If archive was completed within the last hour, assume the single timelapse is for it
             if time_since_completion < timedelta(hours=1):
                 matching_file = video_files[0]
+                match_strategy = "single_recent"
                 logger.info("Using single timelapse file as fallback: %s", video_files[0].get("name"))
 
     # Note: We intentionally don't use a "most recent file" fallback because
     # we can't verify if timelapse was actually enabled for this print.
-    # Instead, return the list of available files for manual selection.
+    # Also avoid auto-attaching heuristic matches from a crowded timelapse folder:
+    # when multiple files exist and the only match is timestamp/mtime proximity,
+    # return manual selection instead of risking an older file from a previous print.
+    if matching_file and match_strategy in {"timestamp", "mtime"} and len(video_files) > 1:
+        logger.info(
+            "Refusing heuristic auto-attach for archive %s: strategy=%s, candidates=%s",
+            archive_id,
+            match_strategy,
+            len(video_files),
+        )
+        matching_file = None
 
     if not matching_file:
         # Return available files for manual selection
@@ -1843,7 +1858,7 @@ async def scan_timelapse(
         available_files.sort(key=lambda x: x.get("mtime") or "", reverse=True)
         return {
             "status": "not_found",
-            "message": "No matching timelapse found - please select manually",
+            "message": "No safe automatic timelapse match found - please select manually",
             "available_files": available_files,
         }
 
