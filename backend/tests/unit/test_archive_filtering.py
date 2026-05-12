@@ -363,8 +363,8 @@ class TestScanForTimelapseWithRetries:
         mock_service.attach_timelapse.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_name_match_fallback(self):
-        """When no new file appears, should fall back to name matching."""
+    async def test_name_match_fallback_ignores_files_already_in_baseline(self):
+        """Should not attach a baseline file via name-match fallback after retries are exhausted."""
         mock_archive, mock_printer = self._make_mocks()
 
         baseline_files = [
@@ -400,10 +400,7 @@ class TestScanForTimelapseWithRetries:
 
             await _scan_for_timelapse_with_retries(1)
 
-        # Name-match fallback: "benchy" is in "benchy_20240101.mp4"
-        mock_service.attach_timelapse.assert_called_once()
-        attached_filename = mock_service.attach_timelapse.call_args[0][2]
-        assert attached_filename == "benchy_20240101.mp4"
+        mock_service.attach_timelapse.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_stops_when_archive_already_has_timelapse(self):
@@ -756,6 +753,147 @@ class TestAttachTimelapseBackgroundConversion:
         assert "timelapse-convert-1" in mock_create_task.call_args[1]["name"]
         # Close the unawaited coroutine to prevent GC warning
         mock_create_task.call_args[0][0].close()
+
+
+class TestManualScanTimelapse:
+    """Test POST /archives/{id}/timelapse/scan endpoint."""
+
+    @staticmethod
+    def _make_archive_and_printer():
+        from datetime import datetime
+
+        mock_archive = MagicMock()
+        mock_archive.id = 1
+        mock_archive.timelapse_path = None
+        mock_archive.printer_id = 1
+        mock_archive.filename = "widget.gcode.3mf"
+        mock_archive.started_at = datetime(2026, 5, 8, 9, 43, 48)
+        mock_archive.completed_at = datetime(2026, 5, 8, 10, 30, 0)
+        mock_archive.created_at = datetime(2026, 5, 8, 10, 30, 0)
+
+        mock_printer = MagicMock()
+        mock_printer.id = 1
+        mock_printer.ip_address = "192.168.1.100"
+        mock_printer.access_code = "12345678"
+        mock_printer.model = "X1C"
+        return mock_archive, mock_printer
+
+    @staticmethod
+    async def _run_scan(video_files):
+        from backend.app.api.routes.archives import scan_timelapse
+
+        mock_archive, mock_printer = TestManualScanTimelapse._make_archive_and_printer()
+
+        mock_service = MagicMock()
+        mock_service.get_archive = AsyncMock(return_value=mock_archive)
+        mock_service.attach_timelapse = AsyncMock(return_value=True)
+
+        mock_db = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_printer
+        mock_db.execute = AsyncMock(return_value=mock_result)
+
+        with (
+            patch("backend.app.api.routes.archives.ArchiveService", return_value=mock_service),
+            patch(f"{_FTP_MODULE}.list_files_async", new_callable=AsyncMock) as mock_list,
+            patch(f"{_FTP_MODULE}.download_file_bytes_async", new_callable=AsyncMock) as mock_download,
+            patch(f"{_FTP_MODULE}.get_ftp_retry_settings", new_callable=AsyncMock) as mock_retry,
+        ):
+            mock_list.return_value = video_files
+            mock_download.return_value = b"fake video data"
+            mock_retry.return_value = (False, 0, 0, 30)
+            result = await scan_timelapse(archive_id=1, db=mock_db)
+
+        return result, mock_service
+
+    @pytest.mark.asyncio
+    async def test_scan_auto_attaches_unique_heuristic_candidate_even_when_multiple_files_exist(self):
+        """Should still auto-attach when all timezone heuristics collapse to one safe candidate."""
+        from datetime import datetime
+
+        video_files = [
+            {
+                "name": "video_2026-05-08_09-41-29.mp4",
+                "is_directory": False,
+                "size": 1000,
+                "path": "/timelapse/video_2026-05-08_09-41-29.mp4",
+                "mtime": datetime(2026, 5, 8, 10, 31, 0),
+            },
+            {
+                "name": "video_2026-05-08_22-00-00.mp4",
+                "is_directory": False,
+                "size": 1000,
+                "path": "/timelapse/video_2026-05-08_22-00-00.mp4",
+                "mtime": datetime(2026, 5, 8, 22, 10, 0),
+            },
+            {
+                "name": "video_2026-05-07_12-00-00.mp4",
+                "is_directory": False,
+                "size": 1000,
+                "path": "/timelapse/video_2026-05-07_12-00-00.mp4",
+                "mtime": datetime(2026, 5, 7, 12, 10, 0),
+            },
+        ]
+
+        result, mock_service = await self._run_scan(video_files)
+
+        assert result["status"] == "attached"
+        assert result["filename"] == "video_2026-05-08_09-41-29.mp4"
+        mock_service.attach_timelapse.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_scan_returns_shortlisted_timezone_candidates_for_manual_selection(self):
+        """Should return only the best unique timezone-based candidates instead of every video in the folder."""
+        from datetime import datetime
+
+        video_files = [
+            {
+                "name": "video_2026-05-08_09-41-29.mp4",
+                "is_directory": False,
+                "size": 1000,
+                "path": "/timelapse/video_2026-05-08_09-41-29.mp4",
+                "mtime": datetime(2026, 5, 8, 9, 50, 0),
+            },
+            {
+                "name": "video_2026-05-08_17-42-42.mp4",
+                "is_directory": False,
+                "size": 1000,
+                "path": "/timelapse/video_2026-05-08_17-42-42.mp4",
+                "mtime": datetime(2026, 5, 8, 17, 50, 0),
+            },
+            {
+                "name": "video_2026-05-08_16-43-30.mp4",
+                "is_directory": False,
+                "size": 1000,
+                "path": "/timelapse/video_2026-05-08_16-43-30.mp4",
+                "mtime": datetime(2026, 5, 8, 16, 50, 0),
+            },
+            {
+                "name": "video_2026-05-08_01-43-50.mp4",
+                "is_directory": False,
+                "size": 1000,
+                "path": "/timelapse/video_2026-05-08_01-43-50.mp4",
+                "mtime": datetime(2026, 5, 8, 1, 50, 0),
+            },
+            {
+                "name": "video_2026-05-07_12-00-00.mp4",
+                "is_directory": False,
+                "size": 1000,
+                "path": "/timelapse/video_2026-05-07_12-00-00.mp4",
+                "mtime": datetime(2026, 5, 7, 12, 10, 0),
+            },
+        ]
+
+        result, mock_service = await self._run_scan(video_files)
+
+        assert result["status"] == "not_found"
+        assert [f["name"] for f in result["available_files"]] == [
+            "video_2026-05-08_01-43-50.mp4",
+            "video_2026-05-08_16-43-30.mp4",
+            "video_2026-05-08_17-42-42.mp4",
+            "video_2026-05-08_09-41-29.mp4",
+        ]
+        mock_service.attach_timelapse.assert_not_called()
 
 
 class TestDeleteTimelapse:

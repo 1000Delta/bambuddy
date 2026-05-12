@@ -2731,8 +2731,9 @@ async def _scan_for_timelapse_with_retries(archive_id: int, baseline_names: set[
     Otherwise falls back to taking a baseline at completion time (best-effort
     for prints started before app restart).
 
-    Falls back to name-matching (print name contained in MP4 filename) if no
-    new file appears after all retries.
+    Falls back to name-matching only for files that were NOT already present in
+    the baseline snapshot. This avoids attaching an older timelapse that was
+    already on the printer before the current print.
     """
     from pathlib import Path
 
@@ -2887,9 +2888,11 @@ async def _scan_for_timelapse_with_retries(archive_id: int, baseline_names: set[
                 video_files, found_path = await _list_timelapse_videos(printer)
                 for f in video_files:
                     fname = f.get("name", "")
+                    if fname in baseline_names:
+                        continue
                     if base_name.lower() in fname.lower():
                         remote_path = f.get("path") or f"/timelapse/{fname}"
-                        logger.info("[TIMELAPSE] Name-match fallback: '%s' matches '%s'", base_name, fname)
+                        logger.info("[TIMELAPSE] Name-match fallback: '%s' matches new file '%s'", base_name, fname)
 
                         timelapse_data = await download_file_bytes_async(
                             printer.ip_address, printer.access_code, remote_path, printer_model=printer.model
@@ -2902,7 +2905,7 @@ async def _scan_for_timelapse_with_retries(archive_id: int, baseline_names: set[
                                 )
                                 await ws_manager.send_archive_updated({"id": archive_id, "timelapse_attached": True})
                                 return
-                        break  # Only try the first name match
+                        break  # Only try the first post-baseline name match
 
         except Exception as e:
             logger.warning("[TIMELAPSE] Name-match fallback failed: %s", e)
