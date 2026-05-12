@@ -1725,6 +1725,8 @@ async def scan_timelapse(
 
     # Strategy 2: Match by timestamp proximity
     # Bambu timelapse filename uses the print START time (when recording began)
+    heuristic_candidates = []
+    heuristic_candidate_names = set()
     if not matching_file and (archive.started_at or archive.completed_at or archive.created_at):
         import re
         from datetime import datetime, timedelta
@@ -1735,6 +1737,7 @@ async def scan_timelapse(
         archive_end = archive.completed_at or archive.created_at
         best_match = None
         best_diff = timedelta(hours=24)  # Max 24 hour difference
+        best_by_offset = {}
 
         for f in video_files:
             fname = f.get("name", "")
@@ -1748,10 +1751,18 @@ async def scan_timelapse(
                     # Common cases: local time (0), CST/UTC+8 (+8), or UTC (-local offset)
                     for hour_offset in [0, 8, -8, 7, -7, 1, -1]:
                         adjusted_file_time = file_time - timedelta(hours=hour_offset)
+                        offset_best = best_by_offset.get(hour_offset)
 
                         # Check against start time (video filename = print start)
                         if archive_start:
                             diff = abs(adjusted_file_time - archive_start)
+                            if offset_best is None or diff < offset_best["diff"]:
+                                best_by_offset[hour_offset] = {
+                                    "file": f,
+                                    "diff": diff,
+                                    "offset": hour_offset,
+                                    "basis": "start",
+                                }
                             if diff < best_diff:
                                 best_diff = diff
                                 best_match = f
@@ -1767,16 +1778,49 @@ async def scan_timelapse(
                             if adjusted_file_time < archive_end:
                                 diff = archive_end - adjusted_file_time
                                 # Reasonable print duration: up to 48 hours
-                                if diff < timedelta(hours=48) and diff < best_diff:
-                                    best_diff = diff
-                                    best_match = f
-                                    logger.debug(
-                                        f"Timelapse match candidate (from end): {fname} with offset {hour_offset}h, "
-                                        f"diff: {diff}"
-                                    )
+                                if diff < timedelta(hours=48):
+                                    offset_best = best_by_offset.get(hour_offset)
+                                    if offset_best is None or diff < offset_best["diff"]:
+                                        best_by_offset[hour_offset] = {
+                                            "file": f,
+                                            "diff": diff,
+                                            "offset": hour_offset,
+                                            "basis": "end",
+                                        }
+                                    if diff < best_diff:
+                                        best_diff = diff
+                                        best_match = f
+                                        logger.debug(
+                                            f"Timelapse match candidate (from end): {fname} with offset {hour_offset}h, "
+                                            f"diff: {diff}"
+                                        )
 
                 except ValueError:
                     continue
+
+        shortlisted = sorted(best_by_offset.values(), key=lambda candidate: candidate["diff"])
+        for candidate in shortlisted:
+            if candidate["diff"] >= timedelta(hours=4):
+                continue
+            candidate_file = candidate["file"]
+            candidate_name = candidate_file.get("name")
+            if candidate_name in heuristic_candidate_names:
+                continue
+            heuristic_candidate_names.add(candidate_name)
+            heuristic_candidates.append(
+                {
+                    "name": candidate_name,
+                    "path": candidate_file.get("path"),
+                    "size": candidate_file.get("size"),
+                    "mtime": candidate_file.get("mtime").isoformat() if candidate_file.get("mtime") else None,
+                    "match_strategy": "timestamp",
+                    "matched_offset_hours": candidate["offset"],
+                    "match_basis": candidate["basis"],
+                    "match_diff_seconds": int(candidate["diff"].total_seconds()),
+                }
+            )
+            if len(heuristic_candidates) >= 5:
+                break
 
         # Accept match within 4 hours (more lenient for timezone issues)
         if best_match and best_diff < timedelta(hours=4):
@@ -1831,21 +1875,38 @@ async def scan_timelapse(
 
     # Note: We intentionally don't use a "most recent file" fallback because
     # we can't verify if timelapse was actually enabled for this print.
-    # Also avoid auto-attaching heuristic matches from a crowded timelapse folder:
-    # when multiple files exist and the only match is timestamp/mtime proximity,
-    # return manual selection instead of risking an older file from a previous print.
+    # If timestamp/mtime heuristics point to multiple plausible files in a crowded
+    # timelapse folder, return the shortlisted candidates for manual selection.
     if matching_file and match_strategy in {"timestamp", "mtime"} and len(video_files) > 1:
-        logger.info(
-            "Refusing heuristic auto-attach for archive %s: strategy=%s, candidates=%s",
-            archive_id,
-            match_strategy,
-            len(video_files),
-        )
-        matching_file = None
+        matching_name = matching_file.get("name")
+        if match_strategy == "timestamp" and heuristic_candidates:
+            unique_candidate_names = {candidate["name"] for candidate in heuristic_candidates}
+            if len(unique_candidate_names) > 1:
+                logger.info(
+                    "Multiple heuristic timelapse candidates for archive %s: strategy=%s, shortlisted=%s",
+                    archive_id,
+                    match_strategy,
+                    sorted(unique_candidate_names),
+                )
+                matching_file = None
+            else:
+                logger.info(
+                    "Heuristic scan for archive %s converged on a single candidate %s across timezone offsets",
+                    archive_id,
+                    matching_name,
+                )
+        else:
+            logger.info(
+                "Refusing heuristic auto-attach for archive %s: strategy=%s, candidates=%s",
+                archive_id,
+                match_strategy,
+                len(video_files),
+            )
+            matching_file = None
 
     if not matching_file:
         # Return available files for manual selection
-        available_files = [
+        available_files = heuristic_candidates or [
             {
                 "name": f.get("name"),
                 "path": f.get("path"),
@@ -1854,8 +1915,11 @@ async def scan_timelapse(
             }
             for f in video_files
         ]
-        # Sort by mtime descending (most recent first)
-        available_files.sort(key=lambda x: x.get("mtime") or "", reverse=True)
+        if heuristic_candidates:
+            available_files.sort(key=lambda x: (x.get("match_diff_seconds") or 10**12, x.get("name") or ""))
+        else:
+            # Sort by mtime descending (most recent first)
+            available_files.sort(key=lambda x: x.get("mtime") or "", reverse=True)
         return {
             "status": "not_found",
             "message": "No safe automatic timelapse match found - please select manually",

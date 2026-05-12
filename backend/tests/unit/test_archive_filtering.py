@@ -758,12 +758,9 @@ class TestAttachTimelapseBackgroundConversion:
 class TestManualScanTimelapse:
     """Test POST /archives/{id}/timelapse/scan endpoint."""
 
-    @pytest.mark.asyncio
-    async def test_scan_requires_manual_selection_for_heuristic_match_when_multiple_files_exist(self):
-        """Should return manual selection instead of auto-attaching a timestamp-only match from a crowded folder."""
+    @staticmethod
+    def _make_archive_and_printer():
         from datetime import datetime
-
-        from backend.app.api.routes.archives import scan_timelapse
 
         mock_archive = MagicMock()
         mock_archive.id = 1
@@ -779,23 +776,13 @@ class TestManualScanTimelapse:
         mock_printer.ip_address = "192.168.1.100"
         mock_printer.access_code = "12345678"
         mock_printer.model = "X1C"
+        return mock_archive, mock_printer
 
-        video_files = [
-            {
-                "name": "video_2026-05-08_09-41-29.mp4",
-                "is_directory": False,
-                "size": 1000,
-                "path": "/timelapse/video_2026-05-08_09-41-29.mp4",
-                "mtime": datetime(2026, 5, 8, 9, 50, 0),
-            },
-            {
-                "name": "video_2026-05-08_09-46-00.mp4",
-                "is_directory": False,
-                "size": 1000,
-                "path": "/timelapse/video_2026-05-08_09-46-00.mp4",
-                "mtime": datetime(2026, 5, 8, 9, 55, 0),
-            },
-        ]
+    @staticmethod
+    async def _run_scan(video_files):
+        from backend.app.api.routes.archives import scan_timelapse
+
+        mock_archive, mock_printer = TestManualScanTimelapse._make_archive_and_printer()
 
         mock_service = MagicMock()
         mock_service.get_archive = AsyncMock(return_value=mock_archive)
@@ -815,11 +802,97 @@ class TestManualScanTimelapse:
             mock_list.return_value = video_files
             mock_download.return_value = b"fake video data"
             mock_retry.return_value = (False, 0, 0, 30)
-
             result = await scan_timelapse(archive_id=1, db=mock_db)
 
+        return result, mock_service
+
+    @pytest.mark.asyncio
+    async def test_scan_auto_attaches_unique_heuristic_candidate_even_when_multiple_files_exist(self):
+        """Should still auto-attach when all timezone heuristics collapse to one safe candidate."""
+        from datetime import datetime
+
+        video_files = [
+            {
+                "name": "video_2026-05-08_09-41-29.mp4",
+                "is_directory": False,
+                "size": 1000,
+                "path": "/timelapse/video_2026-05-08_09-41-29.mp4",
+                "mtime": datetime(2026, 5, 8, 10, 31, 0),
+            },
+            {
+                "name": "video_2026-05-08_22-00-00.mp4",
+                "is_directory": False,
+                "size": 1000,
+                "path": "/timelapse/video_2026-05-08_22-00-00.mp4",
+                "mtime": datetime(2026, 5, 8, 22, 10, 0),
+            },
+            {
+                "name": "video_2026-05-07_12-00-00.mp4",
+                "is_directory": False,
+                "size": 1000,
+                "path": "/timelapse/video_2026-05-07_12-00-00.mp4",
+                "mtime": datetime(2026, 5, 7, 12, 10, 0),
+            },
+        ]
+
+        result, mock_service = await self._run_scan(video_files)
+
+        assert result["status"] == "attached"
+        assert result["filename"] == "video_2026-05-08_09-41-29.mp4"
+        mock_service.attach_timelapse.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_scan_returns_shortlisted_timezone_candidates_for_manual_selection(self):
+        """Should return only the best unique timezone-based candidates instead of every video in the folder."""
+        from datetime import datetime
+
+        video_files = [
+            {
+                "name": "video_2026-05-08_09-41-29.mp4",
+                "is_directory": False,
+                "size": 1000,
+                "path": "/timelapse/video_2026-05-08_09-41-29.mp4",
+                "mtime": datetime(2026, 5, 8, 9, 50, 0),
+            },
+            {
+                "name": "video_2026-05-08_17-42-42.mp4",
+                "is_directory": False,
+                "size": 1000,
+                "path": "/timelapse/video_2026-05-08_17-42-42.mp4",
+                "mtime": datetime(2026, 5, 8, 17, 50, 0),
+            },
+            {
+                "name": "video_2026-05-08_16-43-30.mp4",
+                "is_directory": False,
+                "size": 1000,
+                "path": "/timelapse/video_2026-05-08_16-43-30.mp4",
+                "mtime": datetime(2026, 5, 8, 16, 50, 0),
+            },
+            {
+                "name": "video_2026-05-08_01-43-50.mp4",
+                "is_directory": False,
+                "size": 1000,
+                "path": "/timelapse/video_2026-05-08_01-43-50.mp4",
+                "mtime": datetime(2026, 5, 8, 1, 50, 0),
+            },
+            {
+                "name": "video_2026-05-07_12-00-00.mp4",
+                "is_directory": False,
+                "size": 1000,
+                "path": "/timelapse/video_2026-05-07_12-00-00.mp4",
+                "mtime": datetime(2026, 5, 7, 12, 10, 0),
+            },
+        ]
+
+        result, mock_service = await self._run_scan(video_files)
+
         assert result["status"] == "not_found"
-        assert len(result["available_files"]) == 2
+        assert [f["name"] for f in result["available_files"]] == [
+            "video_2026-05-08_01-43-50.mp4",
+            "video_2026-05-08_16-43-30.mp4",
+            "video_2026-05-08_17-42-42.mp4",
+            "video_2026-05-08_09-41-29.mp4",
+        ]
         mock_service.attach_timelapse.assert_not_called()
 
 
